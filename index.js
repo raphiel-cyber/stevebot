@@ -26,21 +26,22 @@ const GUILD_ID = process.env.GUILD_ID;
 const VERIFIED_ROLE_ID = process.env.VERIFIED_ROLE_ID;
 const UNVERIFIED_ROLE_ID = process.env.UNVERIFIED_ROLE_ID;
 const LOG_CHANNEL_ID = process.env.LOG_CHANNEL_ID;
+const DM_LOG_CHANNEL_ID = process.env.DM_LOG_CHANNEL_ID;
+const VERIFY_NOTICE_CHANNEL_ID = process.env.VERIFY_NOTICE_CHANNEL_ID;
 
 const VERIFY_EMOJI = '🛎️';
 const OWNER_USER_ID = '1463645435397668992';
 
 // Anti-spam settings
-const SPAM_TIME_WINDOW_MS = 10000; // 10 seconds
+const SPAM_TIME_WINDOW_MS = 10000;
 const MAX_MESSAGES_IN_WINDOW = 5;
 const REPEATED_TEXT_LIMIT = 3;
 const REPEATED_ATTACHMENT_LIMIT = 3;
 const REPEATED_LINK_LIMIT = 3;
-const WARNING_LIMIT = 3;
-const NORMAL_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
-const EVERYONE_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
-const WARNING_RESET_MS = 30 * 60 * 1000; // 30 minutes
-const JOIN_ACCOUNT_MIN_AGE_MS = 24 * 60 * 60 * 1000; // 1 day
+const NORMAL_TIMEOUT_MS = 5 * 60 * 1000;
+const EVERYONE_TIMEOUT_MS = 30 * 60 * 1000;
+const WARNING_RESET_MS = 30 * 60 * 1000;
+const JOIN_ACCOUNT_MIN_AGE_MS = 24 * 60 * 60 * 1000;
 
 // ==========================
 // MEMORY
@@ -106,6 +107,31 @@ async function sendLog(guild, content) {
   }
 }
 
+async function sendDmLog(guild, content) {
+  try {
+    if (!DM_LOG_CHANNEL_ID) return;
+    const channel = guild.channels.cache.get(DM_LOG_CHANNEL_ID);
+    if (!channel) return;
+    await channel.send(content);
+  } catch (error) {
+    console.error('DM log send error:', error);
+  }
+}
+
+async function sendVerifyNotice(guild, content) {
+  try {
+    if (!VERIFY_NOTICE_CHANNEL_ID) return;
+    const channel = guild.channels.cache.get(VERIFY_NOTICE_CHANNEL_ID);
+    if (!channel) return;
+    await channel.send({
+      content,
+      allowedMentions: { roles: [UNVERIFIED_ROLE_ID] }
+    });
+  } catch (error) {
+    console.error('Verify notice send error:', error);
+  }
+}
+
 function getWarningData(userId) {
   const data = warningMap.get(userId);
 
@@ -163,6 +189,27 @@ function formatSpamType(spamType) {
   }
 }
 
+async function verifyMember(member, sourceLabel = 'unknown') {
+  if (!member) return false;
+
+  if (member.roles.cache.has(UNVERIFIED_ROLE_ID)) {
+    await member.roles.remove(UNVERIFIED_ROLE_ID).catch(() => {});
+  }
+
+  if (!member.roles.cache.has(VERIFIED_ROLE_ID)) {
+    await member.roles.add(VERIFIED_ROLE_ID).catch(() => {});
+  }
+
+  pendingVerifications.delete(member.id);
+
+  await sendLog(
+    member.guild,
+    `✅ ${member} (${member.user.tag}) verified successfully through ${sourceLabel}`
+  );
+
+  return true;
+}
+
 async function handleNormalSpamPunishment(message, spamType, matchedContent = '') {
   const userId = message.author.id;
   const warningCount = addWarning(userId);
@@ -178,7 +225,7 @@ async function handleNormalSpamPunishment(message, spamType, matchedContent = ''
 
     await sendLog(
       message.guild,
-      `⚠️ Warning 1 | ${message.author.tag} | Type: ${formatSpamType(spamType)}${matchedContent ? ` | Content: ${matchedContent}` : ''}`
+      `⚠️ ${message.author} warned (1/3) | Type: ${formatSpamType(spamType)}${matchedContent ? ` | Content: ${matchedContent}` : ''}`
     );
     return;
   }
@@ -192,13 +239,16 @@ async function handleNormalSpamPunishment(message, spamType, matchedContent = ''
 
     await sendLog(
       message.guild,
-      `⚠️ Warning 2 | ${message.author.tag} | Type: ${formatSpamType(spamType)}${matchedContent ? ` | Content: ${matchedContent}` : ''}`
+      `⚠️ ${message.author} warned (2/3) | Type: ${formatSpamType(spamType)}${matchedContent ? ` | Content: ${matchedContent}` : ''}`
     );
     return;
   }
 
   if (message.member && message.member.moderatable) {
-    await message.member.timeout(NORMAL_TIMEOUT_MS, `Spam detected: ${formatSpamType(spamType)}`).catch(() => {});
+    await message.member.timeout(
+      NORMAL_TIMEOUT_MS,
+      `Spam detected: ${formatSpamType(spamType)}`
+    ).catch(() => {});
 
     await shortReply(
       message.channel,
@@ -208,12 +258,12 @@ async function handleNormalSpamPunishment(message, spamType, matchedContent = ''
 
     await sendLog(
       message.guild,
-      `⛔ Timed Out | ${message.author.tag} | Duration: 5 minutes | Type: ${formatSpamType(spamType)}${matchedContent ? ` | Content: ${matchedContent}` : ''}`
+      `⛔ ${message.author} timed out for 5 minutes | Type: ${formatSpamType(spamType)}${matchedContent ? ` | Content: ${matchedContent}` : ''}`
     );
   } else {
     await sendLog(
       message.guild,
-      `⚠️ Timeout Failed | ${message.author.tag} | Type: ${formatSpamType(spamType)}${matchedContent ? ` | Content: ${matchedContent}` : ''}`
+      `⚠️ Could not timeout ${message.author} | Type: ${formatSpamType(spamType)}${matchedContent ? ` | Content: ${matchedContent}` : ''}`
     );
   }
 
@@ -237,12 +287,12 @@ async function handleEveryoneHereAbuse(message) {
 
     await sendLog(
       message.guild,
-      `🚨 Instant Timeout | ${message.author.tag} | Duration: 30 minutes | Type: @everyone/@here | Content: ${message.content}`
+      `🚨 ${message.author} instantly timed out for 30 minutes | Type: @everyone/@here | Content: ${message.content}`
     );
   } else {
     await sendLog(
       message.guild,
-      `🚨 Instant Timeout Failed | ${message.author.tag} | Type: @everyone/@here | Content: ${message.content}`
+      `🚨 Could not timeout ${message.author} for @everyone/@here | Content: ${message.content}`
     );
   }
 }
@@ -255,15 +305,24 @@ client.on(Events.GuildMemberAdd, async (member) => {
     pendingVerifications.add(member.id);
 
     await member.send(
-      `Welcome ${member} to Raphiel's Lounge! Before you enter, send ${VERIFY_EMOJI} to prove you’re actually human and not one of those weird bot accounts, then you will be verified! 👋`
+      `Welcome ${member}, before you enter, send ${VERIFY_EMOJI} to prove you’re actually human and not one of those weird bot accounts, then you will be verified! 👋`
     );
 
-    await sendLog(member.guild, `📨 Sent verification DM to ${member.user.tag}`);
+    await sendDmLog(
+      member.guild,
+      `📨 Sent verification DM to ${member} (${member.user.tag})`
+    );
   } catch (error) {
     console.log(`Could not DM ${member.user.tag}. Their DMs may be closed.`);
-    await sendLog(
+
+    await sendDmLog(
       member.guild,
-      `⚠️ Could not DM ${member.user.tag}. Their DMs may be turned off.`
+      `⚠️ Could not DM ${member} (${member.user.tag}). Their DMs may be turned off.`
+    );
+
+    await sendVerifyNotice(
+      member.guild,
+      `<@&${UNVERIFIED_ROLE_ID}> here, be sure to check your DMs to see the message I sent to get verified. If you don't see it, please DM the bot "Verify" to receive the verification. Thank you! :)`
     );
   }
 });
@@ -279,8 +338,11 @@ client.on(Events.MessageCreate, async (message) => {
     // DM VERIFY
     // ==========================
     if (!message.guild) {
-      if (!pendingVerifications.has(message.author.id)) return;
-      if (message.content.trim() !== VERIFY_EMOJI) return;
+      const normalizedDm = normalizeContent(message.content);
+
+      if (normalizedDm !== normalizeContent(VERIFY_EMOJI) && normalizedDm !== 'verify') {
+        return;
+      }
 
       const guild = await client.guilds.fetch(GUILD_ID);
       const member = await guild.members.fetch(message.author.id).catch(() => null);
@@ -298,23 +360,13 @@ client.on(Events.MessageCreate, async (message) => {
         );
         await sendLog(
           guild,
-          `🚫 ${message.author.tag} failed verification because the account is too new`
+          `🚫 ${member || message.author.tag} failed verification because the account is too new`
         );
         return;
       }
 
-      if (member.roles.cache.has(UNVERIFIED_ROLE_ID)) {
-        await member.roles.remove(UNVERIFIED_ROLE_ID).catch(() => {});
-      }
-
-      if (!member.roles.cache.has(VERIFIED_ROLE_ID)) {
-        await member.roles.add(VERIFIED_ROLE_ID).catch(() => {});
-      }
-
-      pendingVerifications.delete(message.author.id);
-
+      await verifyMember(member, 'DM');
       await message.reply('Ding! Welcome To Raphiel’s Lounge! 🥂');
-      await sendLog(guild, `✅ ${message.author.tag} verified successfully through DM`);
       return;
     }
 
@@ -325,7 +377,7 @@ client.on(Events.MessageCreate, async (message) => {
       if (message.author.id !== OWNER_USER_ID) return;
 
       await message.channel.send({
-        content: `<@&${UNVERIFIED_ROLE_ID}> here, be sure to check your DMs to see the message I sent to get verified. Thank you! :)`,
+        content: `<@&${UNVERIFIED_ROLE_ID}> here, be sure to check your DMs to see the message I sent to get verified. If you don't see it, please DM the bot "Verify" to receive the verification. Thank you! :)`,
         allowedMentions: { roles: [UNVERIFIED_ROLE_ID] }
       });
 
@@ -341,7 +393,6 @@ client.on(Events.MessageCreate, async (message) => {
 
     const content = message.content || '';
 
-    // Instant anti-@everyone / @here
     if (content.includes('@everyone') || content.includes('@here')) {
       await handleEveryoneHereAbuse(message);
       return;
